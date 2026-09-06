@@ -17,7 +17,65 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    refresh_token: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str = Field(min_length=6)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+class UserOut(BaseModel):
+    id: str
+    email: EmailStr
+    created_at: datetime
+    alerts_enabled: bool
+
+    class Config:
+        from_attributes = True
+
+
+class UserSettingsUpdate(BaseModel):
+    alerts_enabled: bool
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+
+
+class ChatMessageOut(BaseModel):
+    role: str
+    content: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    ai_generated: bool
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str
 
 
 class WatchlistCreate(BaseModel):

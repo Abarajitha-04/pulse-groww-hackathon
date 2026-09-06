@@ -1,1 +1,11 @@
-from app.models.models import User, Watchlist, WatchlistItem, PriceSnapshot, UserSymbolState, Digest  # noqa: F401
+from app.models.models import (  # noqa: F401
+    User,
+    Watchlist,
+    WatchlistItem,
+    PriceSnapshot,
+    UserSymbolState,
+    Digest,
+    RefreshToken,
+    PasswordResetToken,
+    ChatMessage,
+)
