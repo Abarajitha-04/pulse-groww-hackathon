@@ -1,0 +1,104 @@
+name: CI
+
+# Runs on every push/PR so a broken build never reaches main. Two
+# independent jobs (backend, frontend) rather than one — they have
+# nothing in common, and a frontend lint failure shouldn't hide whether
+# the backend's tests passed, or vice versa.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    # A real Postgres + Redis service container, not just SQLite/memory —
+    # this is what catches a migration that only works on SQLite, or a
+    # cache-backend bug that only shows up against real Redis.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulse
+          POSTGRES_PASSWORD: pulse
+          POSTGRES_DB: pulse_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pulse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (unit + API integration, SQLite, fast)
+        run: python -m pytest -q --cov=app --cov-report=term-missing
+
+      - name: Apply Alembic migration against real Postgres
+        env:
+          DATABASE_URL: postgresql+psycopg2://pulse:pulse@localhost:5432/pulse_test
+        run: alembic upgrade head
+
+      - name: Boot the app against Postgres + Redis (smoke test)
+        env:
+          DATABASE_URL: postgresql+psycopg2://pulse:pulse@localhost:5432/pulse_test
+          CACHE_BACKEND: redis
+          REDIS_URL: redis://localhost:6379/0
+          ENVIRONMENT: production
+          SECRET_KEY: ci-only-secret-not-used-anywhere-real-32bytes-min
+          CORS_ORIGINS: '["http://localhost:8080"]'
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 20); do
+            curl -fsS http://127.0.0.1:8000/health/ready && exit 0 || sleep 1
+          done
+          echo "Backend never became ready" >&2
+          exit 1
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check + build
+        run: npm run build

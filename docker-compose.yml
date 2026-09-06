@@ -1,0 +1,91 @@
+# Local stack that mirrors production topology: Postgres + Redis instead
+# of the zero-setup SQLite/in-memory dev defaults, so integration issues
+# surface here instead of in production. Not meant to replace `.env` +
+# `uvicorn --reload` for fast inner-loop dev — use this to test the
+# multi-instance / real-datastore path, or in CI.
+#
+# Usage:
+#   docker compose up --build
+# First run only (or after a schema change): the `migrate` service runs
+# automatically before `backend` starts (see depends_on below).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pulse
+      POSTGRES_PASSWORD: pulse
+      POSTGRES_DB: pulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - pulse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://pulse:pulse@postgres:5432/pulse
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+psycopg2://pulse:pulse@postgres:5432/pulse
+      SECRET_KEY: ${SECRET_KEY:-local-compose-secret-change-me-32-bytes-min}
+      CACHE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      # Deliberately only the compose frontend's own origin — main.py's
+      # production startup check refuses to boot if CORS_ORIGINS still
+      # contains the http://localhost:5173 dev origin.
+      CORS_ORIGINS: '["http://localhost:8080"]'
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      FRONTEND_URL: http://localhost:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  pulse_postgres_data:
