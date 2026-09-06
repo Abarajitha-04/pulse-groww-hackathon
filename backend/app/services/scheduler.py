@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.models import WatchlistItem, PriceSnapshot
 from app.services import cache
+from app.services.alert_service import check_and_send_alerts
 from app.services.price_fetcher import fetch_quote, QuoteFetchError
 
 logger = logging.getLogger("pulse.scheduler")
@@ -63,6 +64,14 @@ def poll_once() -> None:
         db.commit()
     finally:
         db.close()
+
+    # Runs after prices are committed (it reads the cache diff_engine
+    # reads from, which is now current) and in its own try/except so an
+    # email-sending problem can never take down the price poll itself.
+    try:
+        check_and_send_alerts()
+    except Exception:
+        logger.exception("check_and_send_alerts failed this cycle")
 
 
 scheduler = BackgroundScheduler()
