@@ -93,6 +93,124 @@ In priority order: a small market-holiday calendar, a lightweight
 news-correlation hint on the digest (explicitly hedged as "likely
 driver," never asserted as causal), a full per-symbol price chart view
 (using `lightweight-charts`, now that it's justified), a larger/searchable
-symbol universe for the NL-add feature, and moving the cache/pub-sub
-layer to real Redis once there's more than one backend process to justify
-it.
+symbol universe for the NL-add feature.
+
+---
+
+## Production-hardening pass (post-hackathon)
+
+The entries above describe the original 72-hour hackathon build. Everything
+below documents the deliberate decisions made turning that into something
+closer to what you'd actually hand to a paying customer — including two
+real bugs the hardening work surfaced and fixed.
+
+### Why refresh tokens (opaque, server-side, hashed) instead of just longer-lived JWTs?
+A stateless JWT can't be revoked early — if one leaks, it's valid until it
+naturally expires no matter what you do. The fix is a short-lived (30 min)
+access token for cheap per-request verification, plus a long-lived (30
+day) opaque refresh token stored server-side as a SHA-256 hash (never the
+raw value — same principle as password hashing). This is what makes
+logout, "log out everywhere," and revoke-on-password-reset actually work,
+not just cosmetically clear a cookie.
+
+### Why rotate the refresh token on every use, and revoke everything on reuse?
+Rotation means a stolen refresh token is only useful once — the legitimate
+client's next refresh naturally invalidates it. But that alone isn't
+enough: if an attacker uses the stolen token before the legitimate client
+does, the *legitimate* client's next refresh would fail with no idea why.
+Detecting reuse (presenting an already-rotated-away token) and responding
+by revoking every session for that user — not just the one being reused —
+is what turns "something's wrong" into an actual security response
+instead of a confusing dead end for the real user. Verified in
+`tests/test_api_auth.py::test_refresh_token_reuse_revokes_the_new_token_too`.
+
+### Why did the multi-symbol scheduler poll never actually get exercised until now?
+Found while writing `tests/test_alert_service.py`: `PriceSnapshot.id` was
+declared as a plain `BigInteger` primary key. SQLite only auto-assigns a
+primary key value for a column declared as exactly `INTEGER` — a `BIGINT`
+primary key on SQLite silently does *not* get rowid-alias behavior, so
+inserting more than one row in a single flush (exactly what
+`scheduler.poll_once()` does the moment two or more symbols are being
+polled in the same cycle) raised a `NOT NULL constraint failed` error. It
+went unnoticed through the entire hackathon build because no test and no
+manual demo ever had two *different* symbols land in the cache/DB in the
+same poll cycle. Fixed with SQLAlchemy's documented cross-dialect idiom —
+`BigInteger().with_variant(Integer, "sqlite")` — which keeps full BIGINT
+range on Postgres while making SQLite's autoincrement actually work.
+Regression-tested directly in `test_alert_service.py`.
+
+### Why does alert de-duplication use a `-1` sentinel for "no baseline yet"?
+Also found while testing: the first draft's de-dup check was `state.
+last_alerted_price is not None and baseline is not None and ...` — but a
+user's very first significant view of a symbol has `last_seen_price =
+None` by definition (there's nothing to compare against yet). That guard
+meant the "already alerted for this baseline" check could never match a
+first-view alert, so it would silently re-send an email every single poll
+cycle (every 45 seconds) until the user viewed the symbol. Since a real
+price is never ≤ 0, using `-1.0` as an explicit sentinel for "no baseline"
+lets that case de-duplicate through the exact same code path as every
+other baseline, instead of needing a separate branch. Both the original
+bug and the fix are documented in the code comment right next to the
+check, not just here — the point is to stop someone "cleaning up" that
+sentinel back into the broken version.
+
+### Why Alembic now, having previously decided against it?
+The earlier decision was explicitly "not yet, while the schema hasn't
+shipped." That condition no longer holds once real customer data could
+exist. `alembic/env.py` is wired to the app's own `Settings.DATABASE_URL`
+and `Base.metadata`, so the same migration runs correctly against SQLite
+in dev and Postgres in production. `app/main.py` now only auto-creates
+tables via `create_all()` when `ENVIRONMENT != "production"` — in
+production, a missed migration should fail loudly (the app boots against
+a schema it doesn't recognize), not get silently patched over.
+
+### Why does `CACHE_BACKEND=redis` also need to handle cross-process pub/sub, not just shared storage?
+Once there's more than one backend instance, two things break with the
+old in-memory cache: (1) each instance polls prices independently
+(duplicate API calls, and users get different answers depending which
+instance served them), and (2) a WebSocket client connected to instance B
+never hears about a price instance A just fetched. `app/services/cache.py`'s
+Redis backend fixes both — a Redis hash for storage (any instance's
+`HGETALL` sees every symbol any instance has ingested) plus a Redis
+pub/sub channel that every instance's `AsyncBroadcaster` subscribes to, so
+a quote published by any instance reaches every instance's WebSocket
+clients. Verified directly (not just unit-tested) against a real local
+Redis: a message published by a simulated "other process" was received by
+this process's broadcaster.
+
+### Why keep `MARKET_DATA_PROVIDER=auto` (yfinance + NSE) as the default even now?
+It's still the only *free* option, and it's still not something you'd
+want a paying customer's production traffic solely depending on (no SLA,
+no commercial license, undocumented NSE endpoint). Rather than pretend
+otherwise, the provider abstraction (`app/services/market_data/`) makes
+switching to a licensed source — Groww's own Trading API is wired up as a
+real, working option, not a stub — a config change (`MARKET_DATA_PROVIDER`
++ two env vars) instead of a rewrite. The honest caveat, stated in
+`market_data/README.md`: Groww's API auth model is built around one
+person's own trading account, and whether its terms permit powering a
+multi-tenant product serving other people is a question for Groww
+directly, not something resolved in code.
+
+### Why a chatbot grounded in the same verified deltas, with an explicit "not a financial advisor" refusal?
+A watchlist chatbot that quietly starts giving "should I buy this" answers
+is both an inaccurate product (LLMs are not reliable predictors of stock
+prices) and a real legal exposure (unlicensed investment advice). Same
+anti-hallucination pattern as the digest and NL-add features — the LLM
+sees only pre-computed, correct deltas and is explicitly instructed to
+decline advice questions rather than answer them "helpfully." The
+deterministic fallback (no Groq key, or the API call fails) never faces
+this risk at all, since it only ever echoes the verified numbers back.
+
+### Why soft-delete for account deletion, and why does it still clear chat history?
+A hard `DELETE FROM users` would need to either cascade-delete or orphan
+every row that references `user_id` (watchlists, digests, refresh
+tokens) — fine for a hobby project, riskier once there's a support
+process or a legal hold that might need those records intact. Soft-delete
+(`is_active=False`, email scrubbed to a non-guessable placeholder, every
+session revoked) achieves the practical goal — the account is
+unreachable and unusable within milliseconds of the request — while
+leaving a real hard-delete-after-N-days purge job as a documented,
+explicit next step rather than something silently half-done. Chat history
+is the one exception deleted outright rather than left in place: it's
+more likely to contain free-form personal content than a structured
+watchlist ever would.

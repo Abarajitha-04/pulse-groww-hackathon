@@ -41,44 +41,62 @@ natural-language catch-up summary — without ever inventing a number.
 
 ## Setup
 
-### Backend
+### Quick start (local dev, zero external services)
 
 ```bash
+# backend
 cd backend
 python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env            # defaults work out of the box (SQLite, no Groq key needed)
-PYTHONPATH=. uvicorn app.main:app --reload
-```
+alembic upgrade head            # creates the schema — see docs/DEPLOYMENT.md
+uvicorn app.main:app --reload
 
-Runs at `http://localhost:8000`. Tables are created automatically on
-first run (see `docs/DECISIONS.md` for why this project skips Alembic).
-Add a `GROQ_API_KEY` in `.env` to enable the AI digest — without it, the
-digest endpoint still works, using a deterministic fallback summary.
-
-### Frontend
-
-```bash
+# frontend (separate terminal)
 cd frontend
 npm install
 cp .env.example .env            # points at http://localhost:8000 by default
 npm run dev
 ```
 
-Runs at `http://localhost:5173`.
+Backend runs at `http://localhost:8000`, frontend at
+`http://localhost:5173`. Add a `GROQ_API_KEY` in `backend/.env` to enable
+the AI digest, natural-language watchlist add, and chat assistant —
+without it, all three still work, using deterministic fallbacks built
+from the same verified data.
+
+### Docker (production-shaped local stack)
+
+```bash
+docker compose up --build
+```
+
+Runs Postgres + Redis + backend (with `ENVIRONMENT=production`
+guardrails on) + frontend (nginx), with `alembic upgrade head` run
+automatically as a one-shot step before the backend starts. See
+`docs/DEPLOYMENT.md` for what this validates and its one known
+limitation (this sandbox's own network policy couldn't pull Docker Hub
+images to test the build itself — the app/migration path was instead
+verified directly against local Postgres + Redis; see that doc for the
+specifics).
 
 ### Running the tests
 
 ```bash
 cd backend
-PYTHONPATH=. venv/bin/python -m pytest tests/ -v
+source venv/bin/activate
+pytest -q --cov=app --cov-report=term-missing
 ```
 
-17 tests covering the significance model, the diff engine, and the
-natural-language intent parser — including the per-user-not-per-device
-watermark isolation, the stale-data suppression behaviour, and the
-safety property that the NL-add feature can never invent a ticker.
+57 tests — unit tests for the significance model, diff engine, alert
+de-duplication, and chat/NL-intent fallback logic, plus full HTTP-layer
+integration tests (auth flow including refresh-token rotation and reuse
+detection, watchlist CRUD and authorization boundaries, chat, market
+data, account export/deletion) driven through FastAPI's `TestClient`
+against a real (if in-memory) database — not mocks. ~71% line coverage;
+see `docs/TESTING.md` for exactly what's covered, what's deliberately
+not, and why.
 
 ## A note on live data
 
@@ -92,39 +110,70 @@ not a bug.
 
 ## What's implemented vs. deliberately cut
 
-**Implemented:** auth, multi-watchlist CRUD, symbol-centric price
-ingestion with primary/fallback sources and a circuit breaker, the
-rolling-volatility significance model, the per-user diff engine, the AI
-catch-up digest with graceful fallback, live WebSocket price updates with
-a polling fallback, staleness/market-closed handling, per-symbol
-sparkline trend charts, natural-language "add to watchlist" (e.g. "top 3
-FMCG large-caps") grounded against a fixed, curated symbol universe so it
-can never invent a ticker, and a full test suite (17 tests) for the core
-logic.
+**Core product (the original hackathon build):** auth, multi-watchlist
+CRUD, symbol-centric price ingestion with primary/fallback sources and a
+circuit breaker, the rolling-volatility significance model, the per-user
+diff engine, the AI catch-up digest with graceful fallback, live
+WebSocket price updates with a polling fallback, staleness/market-closed
+handling, per-symbol sparkline trend charts, and natural-language "add to
+watchlist" grounded against a fixed, curated symbol universe.
 
-**Deliberately cut for the 72-hour window** (see `docs/DECISIONS.md` for
-the reasoning on each): Alembic migrations (using `create_all()` instead),
-Redis (an in-process cache with a Redis-shaped interface instead — see
-`app/services/cache.py`), a market holiday calendar, per-device state
-sync, a live sector-classification service for the NL-add feature
-(a curated ~30-symbol universe instead), and news correlation on the
-digest (the one remaining stretch AI feature from the design blueprint).
+**Production hardening (added after the hackathon submission):**
+- Real auth: short-lived JWT access tokens + revocable, rotating refresh
+  tokens with reuse detection, logout / logout-everywhere, password
+  reset, rate limiting on auth endpoints, security headers.
+- Postgres support via Alembic migrations (SQLite stays the zero-setup
+  dev default).
+- A real Redis cache/pub-sub backend for running more than one backend
+  instance correctly (`CACHE_BACKEND=redis`).
+- Docker + docker-compose for backend, frontend, Postgres, and Redis.
+- CI (GitHub Actions): backend tests against real Postgres + Redis, an
+  Alembic migration + app-boot smoke test, and frontend lint/build.
+- Structured JSON logging with request-ID correlation, an optional
+  Sentry hook, and liveness/readiness health endpoints.
+- Email alerts for significant moves, with de-duplication so a single
+  continuous move doesn't spam the same alert every poll cycle.
+- A watchlist chat assistant (Groq-backed, same anti-hallucination
+  pattern as the digest — and explicitly refuses to give investment
+  advice).
+- A pluggable market-data provider abstraction — the free yfinance/NSE
+  path stays the default, with Groww's own Trading API wired up as a
+  real (if not free) licensed alternative.
+- 53 additional tests (unit + full HTTP-layer integration), catching two
+  real bugs along the way — see `docs/DECISIONS.md`'s "Production-
+  hardening pass" section.
+- Account data export and account deletion (soft-delete, session
+  revocation, chat history cleared), plus draft Terms/Privacy pages.
+
+**Still deliberately not done, and why** (see `docs/DECISIONS.md` and
+`docs/TESTING.md` for the full reasoning on each): a market holiday
+calendar; news correlation on the digest; a larger/searchable symbol
+universe for NL-add; frontend component tests (verified instead via
+driven Playwright browser sessions at each milestone); and — the biggest
+one — nothing here replaces getting a real lawyer to review the Terms/
+Privacy pages, or negotiating an actual commercial market-data contract,
+before charging real customers money.
 
 ## Architecture
 
-See `docs/ARCHITECTURE.md` for the full diagram and component breakdown.
+See `docs/ARCHITECTURE.md` for the full diagram and component breakdown,
+and `docs/DEPLOYMENT.md` for how to actually run this in production.
 
 ```
-backend/          FastAPI, SQLAlchemy, the diff/significance engine, Groq digest
+backend/          FastAPI, SQLAlchemy, the diff/significance engine, Groq digest + chat
 frontend/         React + TypeScript + Vite + Tailwind
-docs/             Architecture + the reasoning behind every non-obvious decision
+docs/             Architecture, deployment, testing, and the reasoning behind every non-obvious decision
+docker-compose.yml Local stack mirroring production topology (Postgres + Redis)
+.github/workflows/ CI: tests against real Postgres/Redis, migration check, frontend build
 ```
 
 ## Tech stack
 
-FastAPI · SQLAlchemy · SQLite (Postgres-ready) · APScheduler · yfinance ·
-Groq (Llama 3.1) · React 19 · TypeScript · Vite · TanStack Query ·
-Zustand · Tailwind CSS · native WebSockets.
+FastAPI · SQLAlchemy · PostgreSQL (SQLite for zero-setup dev) · Alembic ·
+Redis · APScheduler · slowapi · yfinance (Groww Trading API as a licensed
+alternative) · Groq (Llama 3.1) · Sentry (optional) · React 19 ·
+TypeScript · Vite · TanStack Query · Zustand · Tailwind CSS · native
+WebSockets · Docker.
 
 ## Product pitch (100 words)
 

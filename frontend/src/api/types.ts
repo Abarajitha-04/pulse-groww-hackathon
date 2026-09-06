@@ -60,3 +60,14 @@ export interface NLAddResult {
   ai_generated: boolean
   explanation: string
 }
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
+export interface ChatResponse {
+  reply: string
+  ai_generated: boolean
+}

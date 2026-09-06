@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { login, signup } from '../api/auth'
 import { useAuthStore } from '../store/authStore'
 
@@ -9,7 +9,7 @@ export function AuthPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const setToken = useAuthStore((s) => s.setToken)
+  const setTokens = useAuthStore((s) => s.setTokens)
   const navigate = useNavigate()
 
   async function handleSubmit(e: React.FormEvent) {
@@ -17,8 +17,8 @@ export function AuthPage() {
     setError(null)
     setLoading(true)
     try {
-      const token = mode === 'signup' ? await signup(email, password) : await login(email, password)
-      setToken(token)
+      const tokens = mode === 'signup' ? await signup(email, password) : await login(email, password)
+      setTokens(tokens)
       navigate('/')
     } catch (err: any) {
       setError(err?.response?.data?.detail ?? 'Something went wrong')
@@ -67,6 +67,20 @@ export function AuthPage() {
         >
           {mode === 'signup' ? 'Already have an account? Log in' : "Don't have an account? Sign up"}
         </button>
+
+        {mode === 'signup' && (
+          <p className="mt-6 text-center text-[11px] text-slate-400">
+            By creating an account you agree to our{' '}
+            <Link to="/terms" className="hover:underline">
+              Terms
+            </Link>{' '}
+            and{' '}
+            <Link to="/privacy" className="hover:underline">
+              Privacy Policy
+            </Link>
+            .
+          </p>
+        )}
       </div>
     </div>
   )

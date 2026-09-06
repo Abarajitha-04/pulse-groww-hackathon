@@ -1,14 +1,23 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createWatchlist, fetchDigest, fetchWatchlists, markSeen } from '../api/watchlists'
+import { logoutServerSide } from '../api/auth'
 import { WatchlistTable } from '../components/WatchlistTable'
 import { DigestCard } from '../components/DigestCard'
+import { ChatWidget } from '../components/ChatWidget'
 import { useAuthStore } from '../store/authStore'
 
 export function DashboardPage() {
   const [activeId, setActiveId] = useState<string | null>(null)
+  const refreshToken = useAuthStore((s) => s.refreshToken)
   const logout = useAuthStore((s) => s.logout)
   const queryClient = useQueryClient()
+
+  async function handleLogout() {
+    if (refreshToken) await logoutServerSide(refreshToken)
+    logout()
+  }
 
   const watchlistsQuery = useQuery({ queryKey: ['watchlists'], queryFn: fetchWatchlists })
 
@@ -47,9 +56,14 @@ export function DashboardPage() {
           <h1 className="text-2xl font-bold">Pulse</h1>
           <p className="text-sm text-slate-500">What's changed since you last checked.</p>
         </div>
-        <button onClick={logout} className="text-xs text-slate-400 hover:text-rose-600">
-          Log out
-        </button>
+        <div className="flex items-center gap-3">
+          <Link to="/settings" className="text-xs text-slate-400 hover:text-blue-600">
+            Settings
+          </Link>
+          <button onClick={handleLogout} className="text-xs text-slate-400 hover:text-rose-600">
+            Log out
+          </button>
+        </div>
       </div>
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
@@ -92,6 +106,8 @@ export function DashboardPage() {
       ) : (
         <p className="text-slate-400">Create a watchlist to get started.</p>
       )}
+
+      <ChatWidget />
     </div>
   )
 }

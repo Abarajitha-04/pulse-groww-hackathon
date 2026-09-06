@@ -4,6 +4,8 @@ backend/**/__pycache__/
 backend/.pytest_cache/
 backend/pulse.db
 backend/.env
+backend/.coverage
+backend/htmlcov/
 
 frontend/node_modules/
 frontend/dist/
